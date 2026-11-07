@@ -275,7 +275,11 @@ object ScalaEmitter {
     private def localName(name: String): String = places.get(name).fold(name)(_.local)
 
     def file(definitions: List[Definition]): String = {
-      val stats = standardImports ++ definitions.flatMap(emit)
+      val configured = definitions.exists {
+        case record: RecordDef => usesConfiguredCodec(record)
+        case _                 => false
+      }
+      val stats = standardImports(configured) ++ definitions.flatMap(emit)
       Trees.print(header, Trees.source(pkg, stats))
     }
 
@@ -324,14 +328,21 @@ object ScalaEmitter {
       Trees.print(header, Trees.source(pkg, imports :+ suite))
     }
 
-    private def standardImports: List[Stat] = List(
-      Trees.namedImport(
-        Trees.termRef("io.circe"),
-        List("Codec", "Decoder", "DecodingFailure", "Encoder", "HCursor", "Json", "JsonObject")
-      ),
-      Trees.wildcardImport(Trees.termRef("io.circe.syntax")),
-      Trees.givenImport(unionRef)
-    )
+    private def standardImports(configured: Boolean): List[Stat] = {
+      val derivation =
+        if configured then
+          List(Trees.namedImport(Trees.termRef("io.circe.derivation"), List("Configuration", "ConfiguredCodec")))
+        else Nil
+      List(
+        Trees.namedImport(
+          Trees.termRef("io.circe"),
+          List("Codec", "Decoder", "DecodingFailure", "Encoder", "HCursor", "Json", "JsonObject")
+        )
+      ) ++ derivation ++ List(
+        Trees.wildcardImport(Trees.termRef("io.circe.syntax")),
+        Trees.givenImport(unionRef)
+      )
+    }
 
     private def emit(definition: Definition): List[Stat] = definition match {
       case record: RecordDef => emitRecord(record)
@@ -342,8 +353,10 @@ object ScalaEmitter {
 
     private def emitRecord(record: RecordDef): List[Stat] = {
       val params = record.fields.map(fieldParam)
-      val explicit = record.fields.size > request.options.explicitCodecFieldThreshold || record.fields.exists(_.syntheticMap)
-      val body = if explicit then explicitCodec(record) else List(derivedCodec(record))
+      val body =
+        if usesConfiguredCodec(record) then configuredCodec(record)
+        else if usesExplicitCodec(record) then explicitCodec(record)
+        else List(derivedCodec(record))
       val name = localName(record.name)
       List(
         Trees.caseClass(name, params, record.parents.map(namedType)),
@@ -356,17 +369,42 @@ object ScalaEmitter {
         if field.syntheticMap then field.defaultLiteral.map(Trees.lit)
         else if !field.required then Some(q"None")
         else field.defaultLiteral.map(Trees.lit)
-      Trees.param(field.jsonName, renderType(field.tpe), default)
+      Trees.param(field.scalaName, renderType(field.tpe), default)
     }
 
-    private def derivedCodec(record: RecordDef): Stat = {
+    private def usesConfiguredCodec(record: RecordDef): Boolean =
+      request.options.fieldNaming == FieldNaming.CamelCase &&
+        record.fields.size <= request.options.explicitCodecFieldThreshold &&
+        !record.fields.exists(_.syntheticMap) &&
+        snakeCaseMatches(record)
+
+    private def usesExplicitCodec(record: RecordDef): Boolean =
+      record.fields.size > request.options.explicitCodecFieldThreshold ||
+        record.fields.exists(_.syntheticMap) ||
+        (request.options.fieldNaming == FieldNaming.CamelCase && !snakeCaseMatches(record))
+
+    private def snakeCaseMatches(record: RecordDef): Boolean =
+      record.fields.forall(field => Names.snakeCase(field.scalaName) == field.jsonName)
+
+    private def derivedCodec(record: RecordDef): Stat =
+      wrappedDerived(record, q"Codec.AsObject.derived[${namedType(record.name)}]")
+
+    private def configuredCodec(record: RecordDef): List[Stat] = {
+      val name = namedType(record.name)
+      List(
+        Trees.givenAlias(None, t"Configuration", q"Configuration.default.withSnakeCaseMemberNames"),
+        wrappedDerived(record, q"ConfiguredCodec.derived[$name]")
+      )
+    }
+
+    private def wrappedDerived(record: RecordDef, derived: Term): Stat = {
       val name = namedType(record.name)
       val filter = nullFilter(record)
       Trees.givenAlias(
         None,
         t"Codec.AsObject[$name]",
         q"""{
-          val derivedCodec = Codec.AsObject.derived[$name]
+          val derivedCodec = $derived
           Codec.AsObject.from(derivedCodec, derivedCodec.mapJsonObject(_.filter($filter)))
         }"""
       )
@@ -409,7 +447,7 @@ object ScalaEmitter {
       }.toList ++ synthetic.toList.map(_ => enumerator"extra <- readAdditional(cursor)")
       val encoders = chunks.map { (fields, index) =>
         val pairs = fields.map { field =>
-          q"${Lit.String(field.jsonName)} -> value.${Trees.term(field.jsonName)}.asJson"
+          q"${Lit.String(field.jsonName)} -> value.${Trees.term(field.scalaName)}.asJson"
         }
         val body = if pairs.isEmpty then q"Nil" else q"List(..$pairs)"
         q"private def ${Term.Name(s"encoded$index")}(value: ${namedType(record.name)}): List[(String, Json)] = $body"
@@ -431,7 +469,7 @@ object ScalaEmitter {
           q"JsonObject.fromIterable($knownExpr).filter(${nullFilter(record)})"
         case Some(field) =>
           val fieldType = renderType(field.tpe)
-          val fieldName = Trees.term(field.jsonName)
+          val fieldName = Trees.term(field.scalaName)
           q"""{
             val known = JsonObject.fromIterable($knownExpr).filter(${nullFilter(record)})
             val extra = Encoder[$fieldType].apply(value.$fieldName).asObject.getOrElse(JsonObject.empty)

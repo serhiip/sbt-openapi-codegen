@@ -34,6 +34,7 @@ object SchemaModel {
 
   final case class Field(
       jsonName: String,
+      scalaName: String,
       tpe: TypeRef,
       required: Boolean,
       defaultLiteral: Option[Literal],
@@ -115,7 +116,8 @@ object SchemaModel {
       rawJson: String,
       overrides: Map[String, String],
       exclusions: Set[String],
-      tagHints: List[String]
+      tagHints: List[String],
+      fieldNaming: FieldNaming
   ): Either[List[SchemaFailure], Model] = {
     val root = parse(rawJson).fold(err => sys.error(s"Invalid OpenAPI JSON: ${err.getMessage}"), identity)
     val schemas = root.hcursor
@@ -123,7 +125,7 @@ object SchemaModel {
       .downField("schemas")
       .as[JsonObject]
       .fold(err => sys.error(s"Missing components.schemas: ${err.getMessage}"), identity)
-    val analyzer = Analyzer(schemas, overrides, exclusions, tagHints)
+    val analyzer = Analyzer(schemas, overrides, exclusions, tagHints, fieldNaming)
     analyzer.run()
   }
 
@@ -157,7 +159,8 @@ object SchemaModel {
       schemas: JsonObject,
       overrides: Map[String, String],
       exclusions: Set[String],
-      tagHints: List[String]
+      tagHints: List[String],
+      fieldNaming: FieldNaming
   ) {
     private val schemaList = schemas.toList
     private val schemaMap = schemaList.toMap
@@ -459,11 +462,13 @@ object SchemaModel {
           if jsonName.contains("`") then fail(s"$path/properties/$jsonName", "field name contains a backtick")
           val resolved = resolve(fieldSchema, s"$path/properties/$jsonName", name + toPascal(jsonName), None)
           if resolved.tpe == TypeRef.NullType || resolved.tpe == TypeRef.Optional(TypeRef.NullType) then Nil
-          else if required.contains(jsonName) then List(Field(jsonName, resolved.tpe, true, resolved.defaultLiteral, false))
-          else List(Field(jsonName, optional(resolved.tpe), false, None, false))
+          else if required.contains(jsonName) then List(makeField(jsonName, resolved.tpe, true, resolved.defaultLiteral, false))
+          else List(makeField(jsonName, optional(resolved.tpe), false, None, false))
         }
         val extra = syntheticMap(additional, path, name, fields.map(_.jsonName).toSet)
-        records(name) = RecordDraft(fields ++ extra.toList)
+        val all = fields ++ extra.toList
+        checkScalaNames(path, all)
+        records(name) = RecordDraft(all)
         Resolved(TypeRef.Named(name), None)
       }
     }
@@ -481,7 +486,7 @@ object SchemaModel {
             None
           } else {
             val mapped = resolve(value, s"$path/additionalProperties", recordName + "Additional", None).tpe
-            Some(Field("additionalProperties", TypeRef.MapOf(mapped), false, Some(Literal.EmptyMap), true))
+            Some(makeField("additionalProperties", TypeRef.MapOf(mapped), false, Some(Literal.EmptyMap), true))
           }
         case _ => None
       }
@@ -813,6 +818,37 @@ object SchemaModel {
         obj("const").flatMap(_.asString).orElse {
           val values = obj("enum").flatMap(_.asArray).map(_.flatMap(_.asString)).getOrElse(Vector.empty)
           if values.size == 1 then Some(values.head) else None
+        }
+      }
+    }
+
+    private def makeField(
+        jsonName: String,
+        tpe: TypeRef,
+        required: Boolean,
+        defaultLiteral: Option[Literal],
+        syntheticMap: Boolean
+    ): Field =
+      Field(jsonName, fieldScalaName(jsonName), tpe, required, defaultLiteral, syntheticMap)
+
+    private def fieldScalaName(jsonName: String): String =
+      fieldNaming match {
+        case FieldNaming.AsInSpec  => jsonName
+        case FieldNaming.CamelCase => Names.fieldScalaName(jsonName)
+      }
+
+    private def checkScalaNames(path: String, fields: List[Field]): Unit = {
+      val grouped = mutable.LinkedHashMap.empty[String, List[String]]
+      fields.foreach { field =>
+        grouped(field.scalaName) = grouped.getOrElse(field.scalaName, Nil) :+ field.jsonName
+      }
+      grouped.foreach { (scalaName, jsonNames) =>
+        if jsonNames.size > 1 then {
+          val listed = jsonNames match {
+            case left :: right :: Nil => s"$left and $right"
+            case many                  => many.mkString(", ")
+          }
+          fail(path, s"properties $listed produce the same Scala name $scalaName")
         }
       }
     }

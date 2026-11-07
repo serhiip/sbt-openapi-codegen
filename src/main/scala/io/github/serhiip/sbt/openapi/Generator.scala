@@ -15,7 +15,8 @@ object Generator {
                   valid.noSpaces,
                   spec.typeOverrides,
                   spec.exampleExclusions,
-                  spec.options.discriminatorTagHints
+                  spec.options.discriminatorTagHints,
+                  spec.options.fieldNaming
                 ).left.map(_.map(_.toString))
     } yield Generated(
       ScalaEmitter.emit(

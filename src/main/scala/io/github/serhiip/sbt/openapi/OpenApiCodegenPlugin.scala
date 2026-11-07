@@ -8,31 +8,26 @@ import scala.util.control.NonFatal
 object OpenApiCodegenPlugin extends AutoPlugin {
   val Version = "0.1.0-SNAPSHOT"
 
-  override def trigger = noTrigger
+  override def trigger  = noTrigger
   override def requires = sbt.plugins.JvmPlugin
 
   object autoImport {
-    val openApiSpecs = settingKey[Seq[OpenApiSpec]]("OpenAPI specifications to generate Scala codecs for")
-    val openApiGenerate = taskKey[Seq[File]]("Generate Scala sources from the configured OpenAPI specifications")
+    val openApiSpecs       = settingKey[Seq[OpenApiSpec]]("OpenAPI specifications to generate Scala codecs for")
+    val openApiGenerate    = taskKey[Seq[File]]("Generate Scala sources from the configured OpenAPI specifications")
     val openApiUpdateSpecs = taskKey[Seq[File]]("Refetch remote OpenAPI specifications and regenerate Scala sources")
 
-    val OpenApiSpec = _root_.io.github.serhiip.sbt.openapi.OpenApiSpec
-    type OpenApiSpec = _root_.io.github.serhiip.sbt.openapi.OpenApiSpec
-    val OpenApiSource = _root_.io.github.serhiip.sbt.openapi.OpenApiSource
-    type OpenApiSource = _root_.io.github.serhiip.sbt.openapi.OpenApiSource
-    val GeneratorOptions = _root_.io.github.serhiip.sbt.openapi.GeneratorOptions
-    type GeneratorOptions = _root_.io.github.serhiip.sbt.openapi.GeneratorOptions
+    export _root_.io.github.serhiip.sbt.openapi.{OpenApiSpec, OpenApiSource, GeneratorOptions, FieldNaming}
   }
 
   import autoImport.*
 
   override lazy val projectSettings: Seq[Setting[?]] = Seq(
-    openApiSpecs := Nil,
-    openApiGenerate := Def.uncached {
+    openApiSpecs       := Nil,
+    openApiGenerate    := Def.uncached {
       generate(openApiSpecs.value, forceFetch = false)
     },
     openApiUpdateSpecs := Def.uncached {
-      val log = streams.value.log
+      val log       = streams.value.log
       val cacheRoot = target.value / "openapi-cache"
       openApiSpecs.value.foreach {
         case spec @ OpenApiSpec(_, OpenApiSource.FromUrl(url, _), _, _, _, _) =>
@@ -41,7 +36,7 @@ object OpenApiCodegenPlugin extends AutoPlugin {
           IO.createDirectory(cache.getParentFile)
           IO.write(cache, SpecLoader.fetch(url, userAgent(spec.name)))
           IO.delete(stampFile(cache))
-        case _ => ()
+        case _                                                                => ()
       }
       openApiGenerate.value
     },
@@ -66,60 +61,62 @@ object OpenApiCodegenPlugin extends AutoPlugin {
   )
 
   private inline def generate(specs: Seq[OpenApiSpec], forceFetch: Boolean): Seq[File] = {
-    val log = streams.value.log
-    val mainRoot = (Compile / sourceManaged).value / "openapi"
-    val testRoot = (Test / sourceManaged).value / "openapi"
+    val log          = streams.value.log
+    val mainRoot     = (Compile / sourceManaged).value / "openapi"
+    val testRoot     = (Test / sourceManaged).value / "openapi"
     val resourceRoot = (Test / resourceManaged).value
-    val cacheRoot = target.value / "openapi-cache"
-    val fingerprint = codeFingerprint()
+    val cacheRoot    = target.value / "openapi-cache"
+    val fingerprint  = codeFingerprint()
     checkDistinct(specs)
-    val loaded = specs.map { spec =>
-      val label = sourceLabel(spec)
+    val loaded       = specs.map { spec =>
+      val label    = sourceLabel(spec)
       val fileName = sourceFileName(spec)
-      val raw = load(spec, cacheRoot, log, forceFetch)
+      val raw      = load(spec, cacheRoot, log, forceFetch)
       spec -> (raw, label, fileName)
     }
-    val generated = loaded.map { case (spec, loadedSpec) =>
+    val generated    = loaded.map { case (spec, loadedSpec) =>
       val (raw, label, fileName) = loadedSpec
       Generator.generate(raw, fileName, spec, label, Version) match {
         case Left(failures) =>
           sys.error(failures.mkString(s"OpenAPI schema generation failed for ${spec.name}:\n", "\n", ""))
-        case Right(result) => (spec, raw, label, result)
+        case Right(result)  => (spec, raw, label, result)
       }
     }
-    val collisions = Generator.collisions(generated.map { case (spec, _, _, result) => (spec.name, spec.packageName, result.definitionNames) })
+    val collisions   = Generator.collisions(generated.map { case (spec, _, _, result) =>
+      (spec.name, spec.packageName, result.definitionNames)
+    })
     if collisions.nonEmpty then sys.error(collisions.mkString("OpenAPI schema generation failed:\n", "\n", ""))
     generated.flatMap { case (spec, raw, label, result) =>
       val scalaName = Names.scalaName(spec.name)
-      val kebab = Names.kebab(spec.name)
-      val mainDir = mainRoot / kebab
-      val cache = cacheFile(cacheRoot, spec)
-      val stamp = stampFile(cache)
-      val key = Generator.stampKey(raw, spec, label, fingerprint)
-      val stamped = readStamp(stamp)
+      val kebab     = Names.kebab(spec.name)
+      val mainDir   = mainRoot / kebab
+      val cache     = cacheFile(cacheRoot, spec)
+      val stamp     = stampFile(cache)
+      val key       = Generator.stampKey(raw, spec, label, fingerprint)
+      val stamped   = readStamp(stamp)
       if stamped.exists(_._1 == key) && stamped.forall(_._2.forall(_.exists())) then {
         log.debug(s"OpenAPI schema $scalaName is up to date")
         stamped.map(_._2).getOrElse(Nil)
       } else {
-        val mainFiles = result.files.main.toList.sortBy(_._1).map { case (name, content) =>
+        val mainFiles    = result.files.main.toList.sortBy(_._1).map { case (name, content) =>
           val file = name.split("/").foldLeft(mainDir)(_ / _)
           writeIfChanged(file, content)
           file
         }
-        val testFile = testRoot / kebab / s"${scalaName}SchemaExamplesSuite.scala"
+        val testFile     = testRoot / kebab / s"${scalaName}SchemaExamplesSuite.scala"
         val resourceFile = resourceRoot / Names.examplesResource(spec.name)
-        val extra = (result.files.testSource, result.files.examplesJson) match {
+        val extra        = (result.files.testSource, result.files.examplesJson) match {
           case (Some(source), Some(json)) =>
             writeIfChanged(testFile, source)
             writeIfChanged(resourceFile, json)
             List(testFile, resourceFile)
-          case _ =>
+          case _                          =>
             IO.delete(testFile)
             IO.delete(resourceFile)
             Nil
         }
         deleteStale(mainDir, result.files.main.keySet)
-        val files = mainFiles ++ extra
+        val files        = mainFiles ++ extra
         writeStamp(stamp, key, files)
         log.info(s"Generated OpenAPI schema $scalaName: ${result.definitionNames.size} definitions, ${result.files.main.size} files")
         files
@@ -134,11 +131,11 @@ object OpenApiCodegenPlugin extends AutoPlugin {
 
   private def load(spec: OpenApiSpec, cacheRoot: File, log: sbt.internal.util.ManagedLogger, forceFetch: Boolean): String =
     spec.source match {
-      case OpenApiSource.FromFile(file) =>
+      case OpenApiSource.FromFile(file)    =>
         if !file.exists() then sys.error(s"OpenAPI spec file does not exist: ${file.getAbsolutePath}")
         else IO.read(file)
       case OpenApiSource.FromUrl(url, ttl) =>
-        val cache = cacheFile(cacheRoot, spec)
+        val cache   = cacheFile(cacheRoot, spec)
         val expired = !cache.exists() || (System.currentTimeMillis() - cache.lastModified()) > ttl.toMillis
         if forceFetch || expired then
           try {
@@ -156,8 +153,8 @@ object OpenApiCodegenPlugin extends AutoPlugin {
     }
 
   private def sourceLabel(spec: OpenApiSpec): String = spec.source match {
-    case OpenApiSource.FromFile(file)   => file.getAbsolutePath
-    case OpenApiSource.FromUrl(url, _)  => url
+    case OpenApiSource.FromFile(file)  => file.getAbsolutePath
+    case OpenApiSource.FromUrl(url, _) => url
   }
 
   private def sourceFileName(spec: OpenApiSpec): String = spec.source match {
@@ -175,7 +172,7 @@ object OpenApiCodegenPlugin extends AutoPlugin {
   private def codeFingerprint(): String = {
     val location = Option(getClass.getProtectionDomain).flatMap(domain => Option(domain.getCodeSource)).map(_.getLocation)
     location match {
-      case None => "unknown"
+      case None      => "unknown"
       case Some(url) =>
         val file = new java.io.File(url.toURI)
         if !file.exists() then url.toString
@@ -186,14 +183,17 @@ object OpenApiCodegenPlugin extends AutoPlugin {
 
   private def directoryFingerprint(root: File): String = {
     def walk(dir: File): List[File] = {
-      val children = Option(dir.listFiles()).toList.flatten
+      val children             = Option(dir.listFiles()).toList.flatten
       val (directories, files) = children.partition(_.isDirectory)
       files.filter(_.getName.endsWith(".class")).toList ++ directories.toList.flatMap(walk)
     }
-    walk(root).map { file =>
-      val relative = root.toPath.relativize(file.toPath).toString
-      s"$relative:${file.lastModified()}:${file.length()}"
-    }.sorted.mkString("\n")
+    walk(root)
+      .map { file =>
+        val relative = root.toPath.relativize(file.toPath).toString
+        s"$relative:${file.lastModified()}:${file.length()}"
+      }
+      .sorted
+      .mkString("\n")
   }
 
   private def readStamp(stampFile: File): Option[(String, List[File])] =
@@ -219,12 +219,12 @@ object OpenApiCodegenPlugin extends AutoPlugin {
   private def deleteStale(dir: File, keep: Set[String]): Unit = {
     def relative(file: File): String =
       file.getAbsolutePath.stripPrefix(dir.getAbsolutePath).stripPrefix(java.io.File.separator)
-    def walk(current: File): Unit =
+    def walk(current: File): Unit    =
       IO.listFiles(current).foreach { file =>
         if file.isDirectory then walk(file)
         else if file.getName.endsWith(".scala") && !keep.contains(relative(file)) then IO.delete(file)
       }
-    def prune(current: File): Unit =
+    def prune(current: File): Unit   =
       IO.listFiles(current).foreach { file =>
         if file.isDirectory then {
           prune(file)

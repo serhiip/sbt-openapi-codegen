@@ -7,12 +7,17 @@ enum OpenApiSource:
   case FromFile(file: File)
   case FromUrl(url: String, ttl: FiniteDuration = 24.hours)
 
+enum FieldNaming:
+  case AsInSpec
+  case CamelCase
+
 final case class GeneratorOptions(
     definitionsPerFile: Int = 40,
     explicitCodecFieldThreshold: Int = 64,
     codecChunkSize: Int = 20,
     discriminatorTagHints: List[String] = List("type", "role", "kind", "status"),
-    generateExampleTests: Boolean = true
+    generateExampleTests: Boolean = true,
+    fieldNaming: FieldNaming = FieldNaming.CamelCase
 )
 
 final case class OpenApiSpec(

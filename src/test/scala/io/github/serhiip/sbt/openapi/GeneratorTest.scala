@@ -136,6 +136,214 @@ class GeneratorTest extends munit.FunSuite {
     assert(message.contains("type override is not a Scala type"))
   }
 
+  test("camelCase field names round-trip through circe snake case") {
+    assertEquals(Names.fieldScalaName("total_cost"), "totalCost")
+    assertEquals(Names.fieldScalaName("is_byok"), "isByok")
+    assertEquals(Names.fieldScalaName("foo2_bar"), "foo2Bar")
+    assertEquals(Names.fieldScalaName("v2_api"), "v2Api")
+    assertEquals(Names.fieldScalaName("1_foo"), "1Foo")
+    assertEquals(Names.snakeCase("totalCost"), "total_cost")
+    assertEquals(Names.snakeCase("isByok"), "is_byok")
+    assertEquals(Names.snakeCase("foo2Bar"), "foo2_bar")
+    assertEquals(Names.snakeCase("v2Api"), "v2_api")
+    assertEquals(Names.snakeCase("1Foo"), "1_foo")
+    assertEquals(Names.snakeCase("HTTPResponse"), "http_response")
+    assertEquals(Names.snakeCase("alreadyCamel"), "already_camel")
+    assertEquals(Names.snakeCase("a__b"), "a__b")
+    assertEquals(Names.snakeCase("uptimeLast5m"), "uptime_last5m")
+    assertEquals(Names.fieldScalaName("alreadyCamel"), "alreadyCamel")
+    assertEquals(Names.fieldScalaName("HTTPResponse"), "HTTPResponse")
+    assertEquals(Names.fieldScalaName("a__b"), "a__b")
+    assertEquals(Names.fieldScalaName("uptime_last_5m"), "uptime_last_5m")
+    assertEquals(Names.fieldScalaName("ephemeral_1h_input_tokens"), "ephemeral_1h_input_tokens")
+    assertEquals(Names.fieldScalaName("latency_last_30m"), "latency_last_30m")
+    assertEquals(Names.fieldScalaName("input_cache_write_1h"), "input_cache_write_1h")
+    assertEquals(Names.fieldScalaName("additionalProperties"), "additionalProperties")
+    assertEquals(Names.snakeCase(Names.fieldScalaName("a__b")), "a__b")
+    assertEquals(Names.snakeCase(Names.fieldScalaName("latency_last_30m")), "latency_last_30m")
+  }
+
+  test("field names stay as in the spec unless camelCase is selected") {
+    val text = dataSpec("total_cost" -> "string", "is_byok" -> "boolean", "totalCost" -> "string")
+    val source = emit(text, GeneratorOptions(fieldNaming = FieldNaming.AsInSpec, generateExampleTests = false)).main.values.mkString("\n")
+    assert(source.contains("total_cost:"))
+    assert(source.contains("is_byok:"))
+    assert(source.contains("totalCost:"))
+    assert(source.contains("Codec.AsObject.derived"))
+    assert(!source.contains("ConfiguredCodec"))
+    assert(!source.contains("withSnakeCaseMemberNames"))
+  }
+
+  test("camelCase renames snake_case fields and derives a configured codec") {
+    val text =
+      """{
+        |  "openapi": "3.1.0",
+        |  "info": { "title": "Names", "version": "1" },
+        |  "components": {
+        |    "schemas": {
+        |      "Data": {
+        |        "type": "object",
+        |        "required": ["total_cost", "raw_payload"],
+        |        "properties": {
+        |          "total_cost": { "type": "string" },
+        |          "is_byok": { "type": "boolean" },
+        |          "foo2_bar": { "type": "string" },
+        |          "v2_api": { "type": "string" },
+        |          "a__b": { "type": "string" },
+        |          "uptime_last_5m": { "type": "string" },
+        |          "raw_payload": {}
+        |        }
+        |      }
+        |    }
+        |  }
+        |}""".stripMargin
+    val files = emit(text, GeneratorOptions(fieldNaming = FieldNaming.CamelCase, generateExampleTests = false))
+    assertParses(files)
+    val source = files.main.values.mkString("\n")
+    assert(source.contains("totalCost: String"))
+    assert(source.contains("isByok: Option[Boolean]"))
+    assert(source.contains("foo2Bar:"))
+    assert(source.contains("v2Api:"))
+    assert(source.contains("a__b:"))
+    assert(source.contains("uptime_last_5m:"))
+    assert(source.contains("rawPayload: io.circe.Json"))
+    assert(source.contains("import io.circe.derivation.{Configuration, ConfiguredCodec}"))
+    assert(source.contains("given Configuration = Configuration.default.withSnakeCaseMemberNames"))
+    assert(source.contains("ConfiguredCodec.derived"))
+    assert(source.contains("mapJsonObject"))
+    assert(source.contains("\"raw_payload\""))
+    assert(!source.contains("Codec.AsObject.derived"))
+    assert(!source.contains("total_cost:"))
+    assert(!source.contains("is_byok:"))
+    assert(!source.contains("\"rawPayload\""))
+  }
+
+  test("explicit codecs keep JSON names and read camelCase accessors") {
+    val files = emit(
+      dataSpec("total_cost" -> "string", "is_byok" -> "boolean"),
+      GeneratorOptions(fieldNaming = FieldNaming.CamelCase, explicitCodecFieldThreshold = 1, generateExampleTests = false)
+    )
+    assertParses(files)
+    val source = files.main.values.mkString("\n")
+    assert(source.contains("totalCost:"))
+    assert(source.contains("isByok:"))
+    assert(source.contains("value.totalCost"))
+    assert(source.contains("value.isByok"))
+    assert(source.contains("\"total_cost\""))
+    assert(source.contains("\"is_byok\""))
+    assert(!source.contains("value.total_cost"))
+    assert(!source.contains("value.is_byok"))
+    assert(!source.contains("ConfiguredCodec"))
+    assert(!source.contains("withSnakeCaseMemberNames"))
+  }
+
+  test("names that are not plain snake case keep their spec spelling") {
+    val files = emit(
+      dataSpec("total_cost" -> "string", "alreadyCamel" -> "string", "HTTPResponse" -> "string"),
+      GeneratorOptions(fieldNaming = FieldNaming.CamelCase, generateExampleTests = false)
+    )
+    assertParses(files)
+    val source = files.main.values.mkString("\n")
+    assert(source.contains("totalCost:"))
+    assert(source.contains("alreadyCamel:"))
+    assert(source.contains("HTTPResponse:"))
+    assert(source.contains("value.totalCost"))
+    assert(source.contains("value.alreadyCamel"))
+    assert(source.contains("value.HTTPResponse"))
+    assert(source.contains("\"total_cost\""))
+    assert(source.contains("\"alreadyCamel\""))
+    assert(source.contains("\"HTTPResponse\""))
+    assert(!source.contains("withSnakeCaseMemberNames"))
+    assert(!source.contains("totalcost"))
+    assert(!source.contains("httpresponse"))
+  }
+
+  test("camelCase quotes keywords and leading digits") {
+    val files = emit(
+      dataSpec("type" -> "string", "class" -> "string", "1_foo" -> "string"),
+      GeneratorOptions(fieldNaming = FieldNaming.CamelCase, generateExampleTests = false)
+    )
+    assertParses(files)
+    val source = files.main.values.mkString("\n")
+    assert(source.contains("`type`"))
+    assert(source.contains("`class`"))
+    assert(source.contains("`1Foo`"))
+    assert(source.contains("withSnakeCaseMemberNames"))
+  }
+
+  test("additionalProperties uses the same Scala name as other fields") {
+    val text =
+      """{
+        |  "openapi": "3.1.0",
+        |  "info": { "title": "Names", "version": "1" },
+        |  "components": {
+        |    "schemas": {
+        |      "Data": {
+        |        "type": "object",
+        |        "properties": { "total_cost": { "type": "string" } },
+        |        "additionalProperties": { "type": "string" }
+        |      }
+        |    }
+        |  }
+        |}""".stripMargin
+    val files = emit(text, GeneratorOptions(fieldNaming = FieldNaming.CamelCase, generateExampleTests = false))
+    assertParses(files)
+    val source = files.main.values.mkString("\n")
+    assert(source.contains("totalCost:"))
+    assert(source.contains("additionalProperties: Map[String, String] = Map.empty"))
+    assert(source.contains("value.totalCost"))
+    assert(source.contains("value.additionalProperties"))
+    assert(source.contains("\"total_cost\""))
+    assert(!source.contains("additionalproperties"))
+    assert(!source.contains("withSnakeCaseMemberNames"))
+  }
+
+  test("camelCase field names that collide fail with both JSON names") {
+    val text = dataSpec("total_cost" -> "string", "totalCost" -> "string")
+    val openApi = OpenApiSpec(
+      "Names",
+      OpenApiSource.FromFile(new java.io.File("names.json")),
+      "demo",
+      options = GeneratorOptions(fieldNaming = FieldNaming.CamelCase, generateExampleTests = false)
+    )
+    Generator.generate(text, "names.json", openApi, "names.json", "test") match {
+      case Left(errors) =>
+        val message = errors.mkString("\n")
+        assert(message.contains("total_cost and totalCost"))
+        assert(message.contains("totalCost"))
+      case Right(_) => fail("expected field name collision")
+    }
+  }
+
+  test("a camelCase property that clashes with additionalProperties fails with both JSON names") {
+    val text =
+      """{
+        |  "openapi": "3.1.0",
+        |  "info": { "title": "Names", "version": "1" },
+        |  "components": {
+        |    "schemas": {
+        |      "Data": {
+        |        "type": "object",
+        |        "properties": { "additional_properties": { "type": "string" } },
+        |        "additionalProperties": { "type": "string" }
+        |      }
+        |    }
+        |  }
+        |}""".stripMargin
+    val openApi = OpenApiSpec(
+      "Names",
+      OpenApiSource.FromFile(new java.io.File("names.json")),
+      "demo",
+      options = GeneratorOptions(fieldNaming = FieldNaming.CamelCase, generateExampleTests = false)
+    )
+    Generator.generate(text, "names.json", openApi, "names.json", "test") match {
+      case Left(errors) =>
+        val message = errors.mkString("\n")
+        assert(message.contains("additional_properties and additionalProperties"))
+      case Right(_) => fail("expected field name collision")
+    }
+  }
+
   test("specs in different packages may reuse a name") {
     val message = Generator.collisions(
       List(
@@ -144,6 +352,27 @@ class GeneratorTest extends munit.FunSuite {
       )
     )
     assertEquals(message, Nil)
+  }
+
+  private def emit(text: String, options: GeneratorOptions): ScalaEmitter.GeneratedFiles = {
+    val openApi = OpenApiSpec(
+      "Names",
+      OpenApiSource.FromFile(new java.io.File("names.json")),
+      "demo",
+      options = options
+    )
+    Generator.generate(text, "names.json", openApi, "names.json", "test").fold(err => fail(err.mkString("\n")), _.files)
+  }
+
+  private def dataSpec(properties: (String, String)*): String = {
+    val props = properties.map { (name, tpe) =>
+      s""""${name.replace("\\", "\\\\").replace("\"", "\\\"")}": { "type": "$tpe" }"""
+    }.mkString(", ")
+    s"""{
+       |  "openapi": "3.1.0",
+       |  "info": { "title": "Names", "version": "1" },
+       |  "components": { "schemas": { "Data": { "type": "object", "properties": { $props } } } }
+       |}""".stripMargin
   }
 
   private def assertParses(files: ScalaEmitter.GeneratedFiles): Unit = {
